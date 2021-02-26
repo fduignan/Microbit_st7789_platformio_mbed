@@ -4,6 +4,10 @@
 
 #define SCREEN_WIDTH 240
 #define SCREEN_HEIGHT 320
+#define Y_TOUCH_MAX 1952
+#define Y_TOUCH_MIN 88
+#define X_TOUCH_MAX 1920
+#define X_TOUCH_MIN 112
 class Display {
 public:        
     Display() {};
@@ -16,6 +20,12 @@ public:
     void drawRectangle(uint16_t x, uint16_t y, uint16_t w, uint16_t h, uint16_t Colour);
     void drawCircle(uint16_t x0, uint16_t y0, uint16_t radius, uint16_t Colour);
     void fillCircle(uint16_t x0, uint16_t y0, uint16_t radius, uint16_t Colour);
+    // Graphics text functions
+    void print(const char *Text, uint16_t len, uint16_t x, uint16_t y, uint16_t ForeColour, uint16_t BackColour);
+    void print(uint16_t Number, uint16_t x, uint16_t y, uint16_t ForeColour, uint16_t BackColour); 
+    int penDown(void);
+    uint16_t readYTouch(void);
+    uint16_t readXTouch(void);
 private:
 
     void CommandMode();
@@ -33,5 +43,7 @@ private:
         else
             return x;
     }
+    void initTouch(void);
     
+
 };

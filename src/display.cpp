@@ -1,25 +1,26 @@
 #include "mbed.h"
 #include "display.h"
+#include "font5x7.h"
+extern Serial g_Serial_pc;
 //mosi,miso,clk,ss
-SPI spi(P0_25,P0_26,P0_27,P0_28);
+SPI spi(P0_25,P0_26,P0_27);
 DigitalOut Rst(P0_7);
 DigitalOut DC(P0_6);
-
+DigitalOut D_CS(P0_28);
+DigitalOut T_CS(P0_5);
+DigitalIn PenIRQ(P0_4);
 void Display::begin()
 {
-    while(0)
-    {
-        DC = 1;
-        Rst = 1;
-        wait(0.5);
-        DC = 0;
-        Rst = 0;
-        wait(0.5);
-    }
+
     spi.format(8, 0);
     spi.frequency(8000000);
-    resetDisplay();
+    T_CS = 1; // de-assert the touch interface for now
+    D_CS = 1;
 
+    resetDisplay();
+    
+    LCD_Write_Data(0x21);   // Set GVDD  (varies contrast)
+    
     LCD_Write_Cmd(0xC0);    // Power control 
     LCD_Write_Data(0x21);   // Set GVDD  (varies contrast)
 
@@ -46,18 +47,17 @@ void Display::begin()
     LCD_Write_Cmd(0xB6);    // Display Function Control 
     LCD_Write_Data(0x00);   // Use default values
     LCD_Write_Data(0x82);
-    LCD_Write_Data(0x27);  
-    
+    LCD_Write_Data(0x27);      
     LCD_Write_Cmd(0x11);    //Exit Sleep 
     wait(0.120); 
-                                
+
     LCD_Write_Cmd(0x29);    //Display on 
     LCD_Write_Cmd(0x2c); 
     wait(0.005);
     
-    fillRectangle(0,0,SCREEN_WIDTH,SCREEN_HEIGHT,RGBToWord(0,0,0));
-    
-    
+    fillRectangle(0,0,SCREEN_WIDTH,SCREEN_HEIGHT,RGBToWord(0x00,0,0));
+    D_CS = 1;
+
 }
 
 void Display::CommandMode()
@@ -70,13 +70,19 @@ void Display::DataMode()
 }
 void Display::LCD_Write_Cmd(uint8_t cmd)
 {
+    
     CommandMode();
+    D_CS = 0;
     spi.write(cmd);
+    D_CS = 1;
 }
 void Display::LCD_Write_Data(uint8_t data)
 {
+    
     DataMode();
+    D_CS = 0;
     spi.write(data);
+    D_CS = 1;
 }
 void Display::resetDisplay()
 {
@@ -103,21 +109,26 @@ void Display::openAperture(uint16_t x1,uint16_t y1,uint16_t x2,uint16_t y2)
 void Display::putPixel(uint16_t x, uint16_t y, uint16_t Colour)
 {
     uint16_t rx;
+    
     openAperture(x,y,x+1,y+1);
     DataMode();
+    D_CS = 0;
     spi.write((const char *) &Colour,2,(char *)&rx,0);
+    D_CS = 1;
 }
-void Display::putImage(uint16_t x, uint16_t y, uint16_t width, uint16_t height, const uint16_t *Image)
+void Display::putImage(uint16_t xofs, uint16_t yofs, uint16_t width, uint16_t height, const uint16_t *Image)
 {
     uint16_t rx;
     uint16_t Colour;
-    openAperture(x,y,width,height);
-    for (y = 0; y < height; y++)
+    
+    uint16_t x,y;
+    for (y = 0; y < height; y++) {
         for (x=0; x < width; x++)
         {
-            Colour = *(Image++);
-            spi.write((const char *) &Colour,2,(char *)&rx,0);           
-        }
+            Colour = *(Image++);            
+            putPixel(x+xofs,y+yofs,Colour);            
+        }    
+    }
 }
 void Display::fillRectangle(uint16_t x, uint16_t y, uint16_t width, uint16_t height, uint16_t Colour)
 {
@@ -129,9 +140,10 @@ void Display::fillRectangle(uint16_t x, uint16_t y, uint16_t width, uint16_t hei
     #define BUF_SIZE 32
     uint16_t rx;
     uint16_t txBuffer[BUF_SIZE];
-    int count;
+    int count;    
     openAperture(x,y,width,height);
     DataMode();
+    D_CS = 0;
     count = (width*height)/BUF_SIZE;
     if (count)
     { // big area
@@ -160,6 +172,7 @@ void Display::fillRectangle(uint16_t x, uint16_t y, uint16_t width, uint16_t hei
         }
         
     }
+    D_CS = 1;
 }
 
 void Display::drawLineLowSlope(uint16_t x0, uint16_t y0, uint16_t x1,uint16_t y1, uint16_t Colour)
@@ -219,6 +232,7 @@ void Display::drawLineHighSlope(uint16_t x0, uint16_t y0, uint16_t x1,uint16_t y
 void Display::drawLine(uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1, uint16_t Colour)
 {
     // Reference : https://en.wikipedia.org/wiki/Bresenham%27s_line_algorithm
+    D_CS = 0;
     if ( iabs(y1 - y0) < iabs(x1 - x0) )
     {
         if (x0 > x1)
@@ -242,6 +256,7 @@ void Display::drawLine(uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1, uint1
         }
         
     }
+    D_CS = 1;
 }
 
 
@@ -345,4 +360,139 @@ void Display::fillCircle(uint16_t x0, uint16_t y0, uint16_t radius, uint16_t Col
             err += dx - (radius << 1);
         }
     }
+}
+void Display::print(const char *Text, uint16_t len, uint16_t x, uint16_t y, uint16_t ForeColour, uint16_t BackColour)
+{
+        // This function draws each character individually.  It uses an array called TextBox as a temporary storage
+    // location to hold the dots for the character in question.  It constructs the image of the character and then
+    // calls on putImage to place it on the screen
+    uint8_t Index = 0;
+    uint8_t Row, Col;
+    const uint8_t *CharacterCode = 0;    
+    uint16_t TextBox[FONT_WIDTH * FONT_HEIGHT];
+    for (Index = 0; Index < len; Index++)
+    {
+        CharacterCode = &Font5x7[FONT_WIDTH * (Text[Index] - 32)];
+        Col = 0;
+        while (Col < FONT_WIDTH)
+        {
+            Row = 0;
+            while (Row < FONT_HEIGHT)
+            {
+                if (CharacterCode[Col] & (1 << Row))
+                {
+                    TextBox[(Row * FONT_WIDTH) + Col] = ForeColour;
+                }
+                else
+                {
+                    TextBox[(Row * FONT_WIDTH) + Col] = BackColour;
+                }
+                Row++;
+            }
+            Col++;
+        }
+        putImage(x, y, FONT_WIDTH, FONT_HEIGHT, (const uint16_t *)TextBox);
+        x = x + FONT_WIDTH + 2;        
+    }
+}
+void Display::print(uint16_t Number, uint16_t x, uint16_t y, uint16_t ForeColour, uint16_t BackColour)
+{
+     // This function converts the supplied number into a character string and then calls on puText to
+    // write it to the display
+    char Buffer[5]; // Maximum value = 65535
+    Buffer[4] = Number % 10 + '0';
+    Number = Number / 10;
+    Buffer[3] = Number % 10 + '0';
+    Number = Number / 10;
+    Buffer[2] = Number % 10 + '0';
+    Number = Number / 10;
+    Buffer[1] = Number % 10 + '0';
+    Number = Number / 10;
+    Buffer[0] = Number % 10 + '0';
+    print(Buffer, 5, x, y, ForeColour, BackColour);
+}
+void Display::initTouch(void)
+{
+    // This display module has an XPT2046 touch screen controller connected over the SPI interface
+    // The XPT2046 
+    T_CS = 0;
+    spi.write(0b10011000); // 8 bit conversion, ratiometric measurement, read XP
+    //wait_us(100);
+    uint16_t indata,outdata;
+    outdata = 0xffff;
+    spi.write((const char *) &outdata,2,(char *)&indata,2); // write a block of colour
+    T_CS = 1;
+}
+uint16_t Display::readYTouch(void)
+{
+    // This display module has an XPT2046 touch screen controller connected over the SPI interface
+    // The XPT2046 
+    /*
+    Format of command word : 
+    b7 : must be 1
+    b6,5,4 : A2,A1,A0
+    000 : temperature
+
+    b3 : Mode
+    b2 : SER,DFR
+    b1,0 : PD1,PD0
+    */
+    uint16_t indata,outdata;    
+    spi.frequency(2000000); // Can't run the touch screen controller at high speed
+    T_CS = 0;                
+    spi.write((uint8_t)0b10011000); // 12 bit conversion, ratiometric measurement, reference off
+                                    // read XP which tells us Y (see diagram in datasheet)
+    wait_us(20);    
+    outdata = 0xffff;
+    spi.write((const char *) &outdata,2,(char *)&indata,2); 
+    T_CS = 1;        
+    spi.frequency(8000000);   
+    int calibrated_return= (indata>>12)+((indata & 0xff)<<4);
+    calibrated_return = (calibrated_return - Y_TOUCH_MIN); 
+    if (calibrated_return < 0)
+        calibrated_return = 0;
+    calibrated_return = (calibrated_return * SCREEN_HEIGHT) / (Y_TOUCH_MAX - Y_TOUCH_MIN) ;
+    return calibrated_return;
+}
+uint16_t Display::readXTouch(void)
+{
+    // This display module has an XPT2046 touch screen controller connected over the SPI interface
+    // The XPT2046 
+    /*
+    Format of command word : 
+    b7 : must be 1
+    b6,5,4 : A2,A1,A0
+    000 : temperature
+
+    b3 : Mode
+    b2 : SER,DFR
+    b1,0 : PD1,PD0
+    */
+    uint16_t indata,outdata;     
+    spi.frequency(2000000);// Can't run the touch screen controller at high speed
+    T_CS = 0;                
+    spi.write((uint8_t)0b11011000); // 12 bit conversion, ratiometric measurement, reference off
+                                    // read YP which tells us X (see diagram in datasheet)
+    wait_us(20);    
+    outdata = 0xffff;
+    spi.write((const char *) &outdata,2,(char *)&indata,2); 
+    T_CS = 1;        
+    spi.frequency(8000000);    
+    int calibrated_return= (indata>>12)+((indata & 0xff)<<4);    
+    calibrated_return = (calibrated_return - X_TOUCH_MIN);
+    if (calibrated_return < 0)
+        calibrated_return = 0;
+    calibrated_return = (calibrated_return * SCREEN_WIDTH) / (X_TOUCH_MAX - X_TOUCH_MIN);
+    // The X reading is backwards so need to subtract it from the screen width
+    calibrated_return = SCREEN_WIDTH - calibrated_return;
+    if (calibrated_return < 0)
+        calibrated_return = 0;
+    return calibrated_return;
+}
+int Display::penDown(void)
+{           
+    if (PenIRQ.read()==0)
+        return 1;
+    else
+        return 0;
 }
